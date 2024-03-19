@@ -1,0 +1,12 @@
+1. DONE Capacitance_Spectrum_Tensor
+2. DONE Real_Space_Table
+3. DONE PreCalculations
+4. DONE Capacitance_Tensor
+5. DONE CellList
+6. DONE NeighborList
+7. DONE MagneticDipole
+8. DONE MagneticField
+9. DONE Spread
+10. DONE Scale
+11. DONE Contract
+12. DONE RealSpace
