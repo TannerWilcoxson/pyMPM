@@ -42,7 +42,8 @@ p = zeros(N, 3, 3, N_frames, N_k); % particle dipoles
 for j = 1:N_frames
     
     % Loop through wavevectors
-    parfor i = 1:N_k
+    %parfor i = 1:N_k
+    for i = 1:N_k
 
         % Construct initial guess
         beta = (eps_p(:,i)-1)./(eps_p(:,i)+2);

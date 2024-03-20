@@ -55,7 +55,6 @@ for i = 1:3
     
     % Update initial guess from a column permutation
     Sguess = S_i(:,[3,1,2]);
-    
 end
 
 end

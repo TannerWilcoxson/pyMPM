@@ -7,9 +7,6 @@ eps_inf = 2; % high-freq dielectric constant
 % Other parameters
 xi = 0.5; % Ewald parameter
 
-% Add the capacitance scripts to path
-addpath('/Users/zacharysherman/Documents/Scattering/MATLAB/Capacitance_Hetero');
-
 % Drude model
 k = (0.01:0.01:0.8)'; % wave vectors (relative to plasma freq.)
 eps_p = eps_inf-1./(k.^2+1i*k.*gamma); % dielectric function
@@ -33,7 +30,6 @@ N = size(x, 1);
 
 % Assign all particles the same dielectric function
 eps_in = repmat(eps_p.', N, 1);
-disp(size(eps_in))
 
 % Output filename
 outfile = sprintf('dipoles.mat'); % output file name

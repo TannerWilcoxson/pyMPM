@@ -1,67 +1,79 @@
 import numpy as np
+np.set_printoptions(edgeitems=30, linewidth=100000,
+    formatter=dict(float=lambda x: "%.3g" % x))
+import itertools
+import time
+import warnings
 from scipy.sparse.linalg import gmres
 from scipy.special import jv as besselj
 from scipy.special import erfc
 from scipy.interpolate import interp1d
 from scipy.fft import fftn, fftshift, ifftn, ifftshift
-from scipy.sparse.linalg import spsolve
+from scipy.sparse.linalg import gmres,LinearOperator
 from scipy.optimize import root
+from scipy.sparse.linalg import lsqr
 
+@profile
 def run_MPM(posistions,box,gamma,eps_inf,xi,kmin,kmax,dk,outfile = "MPM"):# {{{
-    num_particles = positions.shape[0]
-    k = np.arange(kmin,kmax+dk,dk)
-    eps_p = eps_inf - 1/(k**2+1j*k*gamma)
-    eps_in = np.repeat(eps_p.reshape(len(k),1),num_particles,axis = 1)
+    num_particles = positions.shape[1]
+    k = np.arange(kmin,kmax+dk,dk).astype("complex128")
+    num_waves = len(k)
+    eps_p = (eps_inf - 1/(k**2+1j*k*gamma))
+    eps_in = np.ones([num_waves,num_particles])*eps_p[:,None]
 
-    C,p = capacitance_tensor_spectrum(positions,box,eps_in,xi)
+    cap,dip = capacitance_tensor_spectrum(positions,box,eps_in,xi)
 
-    np.save(outfile + "_capacitance.npy",C)
-    np.save(outfile + "_dipoles.npy",p)
+    np.save(outfile + "_wavenumbers.npy",k)
+    np.save(outfile + "_capacitance.npy",cap)
+    np.save(outfile + "_dipoles.npy",dip)
     # }}}
+def plot_MPM(infile = "MPM"):# {{{
+    C = np.load(infile + "_capacitance.npy")
+    eps_p = np.load(infile + "_dipoles.npy")
+    k = np.load(infile + "_wavenumbers.npy")
+    pass# }}}
 def capacitance_tensor_spectrum(pos,box,eps_p,xi,particle_dia = None,errortol = 1e-3):# {{{
     num_frames = pos.shape[0]
     num_particles = pos.shape[1]
     num_wavevectors = eps_p.shape[0]
 
     if particle_dia is None:
-        particle_dia = 1
+        particle_radius = 1
     if not np.iterable(particle_dia):
-        eta = (np.pi/6 * particle_dia**3 * num_particles) / np.prod(box)
+        eta = (4*np.pi/3 * particle_radius**3 * num_particles) / np.prod(box)
     else:
-        eta = np.pi/6*np.sum(particle_dia**3) / np.prod(box)
+        eta = 4*np.pi/3 * np.sum(particle_radius**3) / np.prod(box)
 
     r_table = np.arange(1,10,.001)
-    _,_,filed_dip_1, field_dip_2,_,_ = real_space_table(r_table,xi)
-    r_table = np.insert(real_space_table,0,0)
+    _,_,field_dip_1, field_dip_2,_,_ = real_space_table(r_table,xi)
+    r_table = np.insert(r_table,0,0)
 
     kcut = 2*xi*np.sqrt(-np.log(errortol))
-    num_grid_per_dim = np.ceil(1+box*kcut/np.pi)
-    grid_spacing = box/num_grid_per_dim
+    num_grid = np.ceil(1+box*kcut/np.pi).astype(int)
+    grid_spacing = box/num_grid
     num_grid_gaussian = np.ceil(-2*np.log(errortol)/np.pi)
-    [offset,offsetxyz] = precalculations(num_grid_gaussian,grid_spacing)
+    offset,offsetxyz = precalculations(num_grid_gaussian,grid_spacing)
 
-    cap = np.zeros([num_frames,num_wavevectors,3,3])
-    dip = np.zeros([num_frames,num_wavevectors,num_particles,3,3])
+    cap = np.zeros([num_frames,num_wavevectors,3,3],dtype = "complex128")
+    dip = np.zeros([num_frames,num_wavevectors,num_particles,3,3], dtype = "complex128")
 
     for frame_idx in range(num_frames):
 
         ## Parallel starts here in matlab code
         for wavevec_idx in range(num_wavevectors):
+            #print("k: ",wavevec_idx, num_wavevectors)
             beta = (eps_p[wavevec_idx]-1)/(eps_p[wavevec_idx] + 2)
-            p_guess = np.zeros([num_particles,3])
-            A = 4*np.pi*beta/(1-beta*eta)
+            p_guess = np.zeros([num_particles,3]).astype('complex128')
             p_guess[:,0] = 4*np.pi*beta/(1-beta*eta)
             
-            new_cap, new_dip = compute_capacitance_tensor(x[frame_idx,:,:],eps_p[wavevec_idx],
+            new_cap, new_dip = compute_capacitance_tensor(positions[frame_idx,:,:],eps_p[wavevec_idx],
                                                    box,p_guess,xi,field_dip_1,field_dip_2,
                                                    r_table,offset,offsetxyz,errortol = errortol)
 
             cap[frame_idx,wavevec_idx,:,:] = new_cap
             dip[frame_idx,wavevec_idx,:,:,:] = new_dip
 
-    cap = np.average(cap,axis=2)
-    dip = dip[[0,1,2,4,3]]
-
+    cap = np.average(cap,axis=0)
     return cap, dip# }}}
 def real_space_table(r,xi):# {{{
 
@@ -213,16 +225,17 @@ def compute_capacitance_tensor(positions, lambda_p, box, dip_guess, xi, # {{{
                                dipoletable1, dipoletable2, rtable, offset,
                                offsetxyz,errortol):
 
+
     num_particles = positions.shape[0]
 
     H0 = np.identity(3)
-    cap = np.zeros([3,3])
-    dip = np.zeros([num_particles,3,3])
+    cap = np.zeros([3,3],dtype = "complex128")
+    dip = np.zeros([num_particles,3,3],dtype = "complex128")
 
     rc = np.sqrt(-np.log(errortol))/xi
     kcut = 2*xi**2*rc
-    num_grid_per_dim = np.ceil(1+box*kcut/np.pi)
-    grid_spacing = box/num_gird_per_dim
+    num_grid = np.ceil(1+box*kcut/np.pi).astype(int)
+    grid_spacing = box/num_grid
     num_grid_gaussian = np.ceil(-2*np.log(errortol)/np.pi)
 
     eta = num_grid_gaussian * (grid_spacing*xi)**2/np.pi
@@ -230,128 +243,208 @@ def compute_capacitance_tensor(positions, lambda_p, box, dip_guess, xi, # {{{
     if np.any(rc > box/2):
         raise Exception(f"Real space cutoff ({rc:.3f}) larger than half the box length.")
 
-    P1,P2 = gen_neighbor_list(positions,box,rc)
+    p1,p2 = gen_neighbor_list(positions,box,rc,half=False)
 
     for dim in range(3):
-        dip_dim = magnetic_dipole(positions,lambda_p,H0[i],box,P1,P2,
-                                num_grid_per_dim,grid_spacing,num_grid_gaussian,
+
+        dip_dim = magnetic_dipole(positions,lambda_p,H0[dim],box,p1,p2,
+                                num_grid,grid_spacing,num_grid_gaussian,
                                 xi,eta,rc,dip_guess,offset,offsetxyz,
                                 dipoletable1,dipoletable2,rtable,errortol)
         dip[:,:,dim] = dip_dim
-        cap[i,:] = np.average(dip_dim,axis = 0)
+        cap[dim,:] = np.average(dip_dim,axis = 0)
 
-        dip_guess = dip_dim[:,[3,1,2]]
-
-        
-
+        dip_guess = dip_dim[:,[2,0,1]]
+    return cap,dip
 # }}}
-def magnetic_dipole(positions,lambda_p,H,box,P1,P2,num_grid,grid_spacing,num_grid_gaussian,# {{{
-        xi, eta, rc, dip_guess, offset, offsetxyz, dipole_perp, dipole_para, rvals, errortol):
+def magnetic_dipole(positions,lambda_p,H,box,p1,p2,num_grid,grid_spacing,num_grid_gaussian,# {{{
+        xi, eta, rc, dip_guess, offset, offsetxyz, dip_perp, dip_para, rvals, errortol):
+
 
     num_particles = positions.shape[0]
-    restart = min([3*num_particle,10])
-    maxit = min([3*num_particle,100])
+    restart = min([3*num_particles,10])
+    maxit = min([3*num_particles,100])
 
-    Hrep = np.repeat(H,num_particles)
+    dip_guess = dip_guess.flatten()
+
+    #---- k value calculations ----{{{
+    warnings.filterwarnings('ignore')
+
+    Kx = np.arange(-np.ceil((num_grid[0]-1)/2),np.floor((num_grid[0] - 1)/2)+1) * 2*np.pi/box[0]
+    Ky = np.arange(-np.ceil((num_grid[1]-1)/2),np.floor((num_grid[1] - 1)/2)+1) * 2*np.pi/box[1]
+    Kz = np.arange(-np.ceil((num_grid[2]-1)/2),np.floor((num_grid[2] - 1)/2)+1) * 2*np.pi/box[2]
+
+    k0x = np.argwhere(Kx == 0)
+    k0y = np.argwhere(Ky == 0)
+    k0z = np.argwhere(Kz == 0)
+
+    kx,ky,kz = np.meshgrid(Kx,Ky,Kz,indexing='ij')
+    k = np.concatenate([kx[:,:,:,None],ky[:,:,:,None],kz[:,:,:,None]],axis = -1)
+
+    k0_ind = np.array([k0x,k0y,k0z])
+
+    ksq = k**2
+    ksqsm = np.sum(ksq,axis = -1)
+    kmag = np.sqrt(ksqsm)
+    khat = k/kmag[:,:,:,None]
+    khat[*k0_ind] = 0
+
+    etaksq  = np.sum(ksq*(1-eta),axis = -1)
+    Htilde_coeff = 9*np.pi/(2*kmag) * besselj(1+1/2,kmag)**2 * np.exp(-etaksq/(4*xi**2)) / ksqsm
+    Htilde_coeff[*k0_ind] = 0
+
+    kvals = dict()
+    kvals["k"] = k
+    kvals["ksq"] = ksq
+    kvals["ksqsm"] = ksqsm
+    kvals["kmag"] = kmag
+    kvals["khat"] = khat
+    kvals["k0_ind"] = k0_ind
+    kvals["Htilde_coeff"] = Htilde_coeff
+    warnings.filterwarnings('default')# }}}
+
+    #Preallocations
+    Hspace = np.zeros(np.append(num_grid,3)).astype('complex128')
+
+    #Guess
+    Hrep = np.array(H.tolist()*num_particles)
 
     def solve(dip):
         H = magnetic_field(positions,dip,lambda_p, box, p1, p2, num_grid, 
-                       grid_size, num_grid_gaussian, xi, eta, rc, offset,
-                       offsetxyz, dip_perp, dip_para, rvals)
-        return H - Hrep
+                       grid_spacing, num_grid_gaussian, xi, eta, rc, offset,
+                       offsetxyz, dip_perp, dip_para, rvals, kvals,Hspace)
+        ret = H.flatten()
+        return ret
 
-    dip,info = root(solve,dip_guess)
+
+    dip = dip_guess.reshape(num_particles,3)
+    solve = LinearOperator(2*[3*num_particles], matvec = solve,dtype = "complex128")
+
+    restart = min([num_particles*3,10])
+    maxiter = min([num_particles*3,100])
+    dip,info = gmres(solve,Hrep,x0 = dip_guess.reshape(3*num_particles),atol=errortol,
+                            restart = restart, maxiter = maxiter)
+    dip = dip.reshape(num_particles,3)
 
     return dip
 
     # }}}
 def magnetic_field(positions, dipoles, lambda_p, box, p1, p2, num_grid, #{{{
                    grid_size, num_grid_gaussian, xi, eta, rc, offset, 
-                   offsetxyz, dip_perp, dip_para,rvals):
+                   offsetxyz, dip_perp, dip_para,rvals,kvals,Hspace):
 
-    Hx,Hy,Hz = spread(positions, dipoles, num_grid, grid_spacing, xi,eta,num_grid_gaussian,offset,offsetxyz)
+    num_particles = positions.shape[0]
+    dipoles = dipoles.reshape(num_particles,3)
 
-    fHx = fftshift(fftn(Hx))
-    fHy = fftshift(fftn(Hy))
-    fHz = fftshift(fftn(Hz))
-    fH = np.concatenate([fHx,fHy,fHz],axis = -1)
+    H = spread(positions, dipoles, num_grid, grid_size, xi,eta,num_grid_gaussian,offset,offsetxyz,Hspace)
 
-    kx = np.arange(-np.ceil((num_grid[0]-1)/2),np.floor((num_grid[0] - 1)/2)) * 2*np.pi/box[0]
-    ky = np.arange(-np.ceil((num_grid[1]-1)/2),np.floor((num_grid[1] - 1)/2)) * 2*np.pi/box[1]
-    kz = np.arange(-np.ceil((num_grid[2]-1)/2),np.floor((num_grid[2] - 1)/2)) * 2*np.pi/box[2]
+    Hx,Hy,Hz = H.T
+    Hx,Hy,Hz = Hx.T,Hy.T,Hz.T
 
-    k = np.concatenate(np.meshgrid(kx,ky,kz),axis = -1)
+    fHx = fftn(Hx,overwrite_x=True)
+    fHx = fftshift(Hx)[:,:,:,None]
 
-    fHtilde = scale(fH,k,num_grid,xi,eta)
-    Htildex = ifftn(ifftshift(fHtilde[:,:,:,0]))
-    Htildey = ifftn(ifftshift(fHtilde[:,:,:,1]))
-    Htildez = ifftn(ifftshift(fHtilde[:,:,:,2]))
-    Htilde = np.concatenate([Htildex,Htildey,Htildez],axis = -1)
+    fHy = fftn(Hy,overwrite_x=True)
+    fHy = fftshift(Hy)[:,:,:,None]
 
-    Hk = contract(postions,num_grid,grid_spacing,xi,eta,num_grid_gaussian,Htilde,offset,offsetxyz)
-    Hr = real_space(positions,m,lambda_p, box, p1,p2,rc,Hperp,Hpara,rvals)
+    fHz = fftn(Hz,overwrite_x=True)
+    fHz = fftshift(Hz)[:,:,:,None]
+
+    fH = np.concatenate([fHx,fHy,fHz],axis = -1,out=Hspace)
+
+    fHtilde = scale(fH,kvals,num_grid,xi,eta)
+    fHtildex = fHtilde[:,:,:,0]
+
+    Htildex = ifftn(ifftshift(fHtilde[:,:,:,0]))[:,:,:,None]
+    Htildey = ifftn(ifftshift(fHtilde[:,:,:,1]))[:,:,:,None]
+    Htildez = ifftn(ifftshift(fHtilde[:,:,:,2]))[:,:,:,None]
+    Htilde = np.concatenate([Htildex,Htildey,Htildez],axis = -1,out=Hspace)
+
+    Hk = contract(positions,num_grid,grid_size,xi,eta,num_grid_gaussian,Htilde,offset,offsetxyz)
+    Hr = real_space(positions,dipoles,lambda_p, box, p1,p2,rc,dip_perp,dip_para,rvals)
+    
+    ret = Hk + Hr
 
     return Hk + Hr
-
     # }}}
-def spread(positions,dip,num_grid,grid_spacing,xi,eta,num_grid_gaussian,offset,offsetxyz):# {{{
+def spread(positions,dip,num_grid,grid_spacing,xi,eta,num_grid_gaussian,offset,offsetxyz,H):# {{{
     num_particles = positions.shape[0]
-    H = np.zeros(3*[num_grid] + [3])
+    num_spread = num_particles*len(offset)
+    H[:,:,:,:] = 0
 
-    particle_grid_idxs = np.round(positions/grid_spacing)
-    particle_grid_offsets = particles_grid_idxs*grid_spacing - positions
-    particle_grid_effect_idxs = (particle_grid_idxs[:,None,:] + offset[None,:,:]) % num_grid
-    particle_grid_effect_dist = particle_grid_offsets[:,None,:] + offsetxyz[None,:,:]
 
-    Hcoef = (2*xi**2/np.pi)**(3/2)*np.sqrt(1/np.prod(eta))*np.exp(-2*xi**2*particle_grid_effect_dist**2/eta.T)
+    grid_idxs = np.round(positions/grid_spacing).astype(int)
+    particle_grid_dist = grid_idxs*grid_spacing - positions
+    grid_effect_idxs = (grid_idxs[:,None,:] + offset[None,:,:] - 1) % num_grid
+    grid_effect_dist = (particle_grid_dist[:,None,:] + offsetxyz[None,:,:])
 
-    H[particle_grid_effect_idxs] += Hcoef*m
+    grid_effect_div_eta = np.sum(grid_effect_dist**2/eta,axis = -1)
+
+    Hcoef = (2*xi**2/np.pi)**(3/2)*np.sqrt(1/np.prod(eta))*np.exp(-2*xi**2*grid_effect_div_eta)
+    Hspread = Hcoef[:,:,None]*dip[:,None,:]
+
+    grid_effect_idxs = grid_effect_idxs.reshape(num_spread,3)
+    Hspread = Hspread.reshape(num_spread,3)
+
+    np.add.at(H,tuple(grid_effect_idxs.T),Hspread)
+
     return H# }}}
-def scale(fH, k, num_grid, xi, eta):# {{{
-    k2 = k**2
-    k2sm = np.sum(k2,axis = -1)
-    kmag = np.sqrt(k2)
+def scale(fH, kvals, num_grid, xi, eta):# {{{
 
-    k0x = np.ceil((num_grid[0]-1)/2) + 1
-    k0y = np.ceil((num_grid[1]-1)/2) + 1
-    k0z = np.ceil((num_grid[2]-1)/2) + 1
+    k = kvals["k"]
+    ksq = kvals["ksq"]
+    ksqsm = kvals["ksqsm"]
+    kmag = kvals["kmag"]
+    khat = kvals["khat"]
+    k0_ind = kvals["k0_ind"]
+    Htilde_coeff = kvals["Htilde_coeff"]
 
-    khat = k/kmag
 
-    etak2  = np.sum(ksq*(1-eta),axis = -1)
-    Htilde_coeff = 9*np.pi/(2*kmag) * besselj(1+1/2,kmag)**2 * np.exp(-etak2/(4*xi**2)) / k2
-    Htilde_coeff[0,0,0] = 0
-
-    fHtilde = (Htildecoeff*np.sum(khat,fH,-1)[:,:,:,None]) * khat
-    return fHtilde
+    np.multiply(fH,khat,out=fH)
+    fH = fH.T
+    sum = Htilde_coeff*(fH[0]+fH[1]+fH[2]).T
+    fH = fH.T
+    np.multiply(khat,sum[:,:,:,None],out=fH)
+    return fH
 # }}}
-def contract(positions,num_grid,grid_spacing,xi,eta,num_grid_gaussian,Htilder,offset,offsetxyz):# {{{
+def contract(positions,num_grid,grid_spacing,xi,eta,num_grid_gaussian,Htilde,offset,offsetxyz):# {{{
     num_particles = positions.shape[0]
+    num_spread = num_particles*len(offset)
+    Hk = np.zeros([num_particles,3],dtype="complex128")
 
-    particle_grid_idxs = np.round(positions/grid_spacing)
-    particle_grid_offsets = particles_grid_idxs*grid_spacing - positions
-    particle_grid_effect_idxs = (particle_grid_idxs[:,None,:] + offset[None,:,:]) % num_grid
-    particle_grid_effect_dist = particle_grid_offsets[:,None,:] + offsetxyz[None,:,:]
+    grid_idxs = np.round(positions/grid_spacing).astype(int)
+    particle_grid_dist = grid_idxs*grid_spacing - positions
+    grid_effect_idxs = (grid_idxs[:,None,:] + offset[None,:,:] - 1) % num_grid
+    grid_effect_idxs = grid_effect_idxs.reshape(num_spread,3)
 
-    Hcoef = (2*xi**2/np.pi)**(3/2)*np.sqrt(1/np.prod(eta))*np.exp(-2*xi**2*particle_node_effect_dist**2/eta.T)
-    Hcoef *= prod(grid_spacing)
+    grid_effect_dist = (particle_grid_dist[:,None,:] + offsetxyz[None,:,:])
+    grid_effect_div_eta = np.sum(grid_effect_dist**2/eta,axis = -1)
 
-    Hk = np.sum(Hcoeff*Hxtilde[particle_grid_idxs],axis = 1)
+    Hcoef = (2*xi**2/np.pi)**(3/2)*np.sqrt(1/np.prod(eta))*np.exp(-2*xi**2*grid_effect_div_eta)
+    Hcoef *= np.prod(grid_spacing)
+    Hcoef = Hcoef.reshape(num_spread)
+    particle_index = np.repeat(np.arange(num_particles),len(offset))
+
+
+    np.add.at(Hk,particle_index,Hcoef[:,None]*Htilde[*grid_effect_idxs.T])
     return Hk
 # }}}
 def real_space(positions, dip, lambda_p, box, p1, p2, rc, dip_perp, dip_para,rvals):# {{{
-    Hr = -3/(4*np.pi*(1-lambda_p)) * dip
+    Hr = -3/(4*np.pi*(1-lambda_p[:,None])) * dip
 
-    Hr = Hr + m*perp[0]
+    Hr = Hr + dip*dip_perp[0]
 
     r = positions[p1] - positions[p2]
     r = r-box*(2*r/box).astype(int)
     d = np.sqrt(np.sum(r**2,axis = -1))
-    cutoff_flags = [d<rc]
 
+    cutoff_flags = d<rc
     d = d[cutoff_flags]
     r = r[cutoff_flags]
-    r = r/d
+    r = r[:,:]/d[:,None]
+
+    p1 = p1[cutoff_flags]
+    p2 = p2[cutoff_flags]
 
     dip_p2 = dip[p2]
     int_perp = interp1d(rvals,dip_perp)
@@ -360,46 +453,39 @@ def real_space(positions, dip, lambda_p, box, p1, p2, rc, dip_perp, dip_para,rva
     perp = int_perp(d)
     para = int_para(d)
 
-    Hr[p1] = Hr[p1] + perp*(dip_p2 - r*np.sum(dip_p2*r,axis = -1)) + para*r*np.sum(dip_p2*r,axis = -1)
-    pass
+    r_dip_p2 = np.sum(dip_p2*r,axis = -1)
+    np.add.at(Hr,p1,perp[:,None]*(dip_p2 - r*r_dip_p2[:,None]) + para[:,None]*r*r_dip_p2[:,None])
+    return Hr
 # }}}
 def precalculations(num_grid_gaussian,h):# {{{
-    off = int(np.ceil(num_grid_gaussian/2))
+    off = int(num_grid_gaussian/2)
     min_off = -off
-    max_off = off
+    max_off = off+1
     offset = []
     for x in range(min_off,max_off):
         for y in range(min_off,max_off):
             for z in range(min_off,max_off):
                 offset.append([x,y,z])
-    offset = np.array(offset)
+    offset = np.array(offset)[:,[2,1,0]]
     offsetxyz = offset*h
     return offset, offsetxyz# }}}
-def neighbor_list(positions,box,rmax):# {{{
-    positions = positions%box
-    num_cells = int(box/rmax)
-    rmax = box/num_cells
-    num_cells[num_cells < 3] = 3
-    
-    cell = (positions/rmax).astype(int)
-
-    return cell, num_cells# }}}
-def gen_neighbor_list(atoms,cutoff,box_length,half=True):#{{{
-    if np.any(atoms < 0):
-        atoms += length/2
-    numBoxes = (length/cutoff).astype(int)
+def gen_neighbor_list(positions,box_length,cutoff,half=True):#{{{
+    if np.any(positions < 0):
+        positions = np.copy(positions)
+        positions += box_length/2
+    numBoxes = (box_length/cutoff).astype(int)
     if np.any(numBoxes < 3):
-        raise Exception(f"Neighbor cutoff yields less than three boxes")
-    cutoff = length/numBoxes
-    if len(atoms.shape) == 2:
+        raise Exception(f"Neighbor cutoff yields less than three cells:\n    box: {box_length}\n   cutoff: {cutoff}")
+    cutoff = box_length/numBoxes
+    if len(positions.shape) == 2:
         numFrames = 1
-        numParticles = atoms.shape[0]
-        dims = atoms.shape[1]
-    elif len(atoms.shape) == 3:
-        numFrames = atoms.shape[0]
-        numParticles = atoms.shape[1]
-        dims = atoms.shape[2]
-    indices = (atoms/cutoff).astype(int)
+        numParticles = positions.shape[0]
+        dims = positions.shape[1]
+    elif len(positions.shape) == 3:
+        numFrames = positions.shape[0]
+        numParticles = positions.shape[1]
+        dims = positions.shape[2]
+    indices = (positions/cutoff).astype(int)
     if not np.iterable(numBoxes):
         numBoxes = np.array([numBoxes]*dims)
     boxes = {}
@@ -450,3 +536,4 @@ if __name__ == "__main__":
     box = np.array([30,30,30])
     
     run_MPM(positions,box,0.05,2,0.5,0.01,0.8,0.01)
+    plot_MPM()

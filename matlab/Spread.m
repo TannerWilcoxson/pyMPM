@@ -44,7 +44,9 @@ for n = 1:N % loop over particles
     r = nodesxyz - repmat(x(n,:),P^3,1); 
 
     % Coefficient for spreading the dipoles
-    Hcoeff = (2*xi^2/pi)^(3/2)*sqrt(1/prod(eta))*exp(-2*xi^2*r.^2*(1./eta'));
+    rdiveta = r.^2*(1./eta');
+    Hcoeff = (2*xi^2/pi)^(3/2)*sqrt(1/prod(eta))*exp(-2*xi^2*rdiveta);
+    
 
     % Node indices accounting for periodicity
     node = mod(repmat(node0,P^3,1) + offset - repmat([1,1,1],P^3,1),repmat(Ngrid,P^3,1)) + repmat([1,1,1],P^3,1);
@@ -53,6 +55,7 @@ for n = 1:N % loop over particles
     linnode = node(:,1) + Ngrid(1)*(node(:,2)-1) + Ngrid(1)*Ngrid(2)*(node(:,3)-1);
     
     % Accumulate current particle's contribution to the spread dipoles
+    
     Hx(linnode) = Hx(linnode) + Hcoeff*m(n,1);
     Hy(linnode) = Hy(linnode) + Hcoeff*m(n,2);
     Hz(linnode) = Hz(linnode) + Hcoeff*m(n,3);

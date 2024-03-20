@@ -24,12 +24,14 @@ k0z = ceil((Ngrid(3) - 1)/2) + 1;
 % k unit vectors
 khat = k./repmat(sqrt(k2),1,1,1,3);
 khat(k0x,k0y,k0z,:) = 0;
+%khat(:,1,1,:)
 
 % Dot product of eta and k^2 on the grid
 etak2 = dot(repmat(reshape((1-eta),1,1,1,3),size(k(:,:,:,1))),k.^2,4);
 
 % scale the Fourier transform of the grid
 Htildecoeff = 9*pi./(2*sqrt(k2)).*besselj(1+1/2,sqrt(k2)).^2.*exp(-etak2/(4*xi^2))./k2;
+
 Htildecoeff(k0x,k0y,k0z) = 0;
 fHtilde = repmat(Htildecoeff.*dot(khat,fH,4),[1,1,1,3]).*khat;
 
