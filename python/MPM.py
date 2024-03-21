@@ -10,9 +10,8 @@ from scipy.special import jv as besselj
 from scipy.special import erfc
 from scipy.interpolate import interp1d
 from scipy.fft import fftn, fftshift, ifftn, ifftshift
-from scipy.sparse.linalg import gmres,LinearOperator
+from scipy.sparse.linalg import gmres,LinearOperator,cgs
 from scipy.optimize import root
-from scipy.sparse.linalg import lsqr
 
 def run_MPM(posistions,box,gamma,eps_inf,xi,kmin,kmax,dk,outfile = "MPM"):# {{{
     num_particles = positions.shape[1]
@@ -35,7 +34,7 @@ def plot_MPM(infile = "MPM"):# {{{
 
     ext = k*np.imag(C[:,0,0] + C[:,1,1] + C[:,2,2])/3
     plt.plot(k,ext,'k-')
-    plt.ylim(0,20)
+    plt.ylim(0,35)
     plt.show()
     return# }}}
 def capacitance_tensor_spectrum(pos,box,eps_p,xi,particle_dia = None,errortol = 1e-3):# {{{
@@ -67,7 +66,7 @@ def capacitance_tensor_spectrum(pos,box,eps_p,xi,particle_dia = None,errortol = 
 
         ## Parallel starts here in matlab code
         for wavevec_idx in range(num_wavevectors):
-            #print("k: ",wavevec_idx, num_wavevectors)
+            print("k: ",wavevec_idx, num_wavevectors)
             beta = (eps_p[wavevec_idx]-1)/(eps_p[wavevec_idx] + 2)
             p_guess = np.zeros([num_particles,3]).astype('complex128')
             p_guess[:,0] = 4*np.pi*beta/(1-beta*eta)
@@ -361,6 +360,7 @@ def magnetic_dipole(positions,lambda_p,H,box,p1,p2,num_grid,grid_spacing,num_gri
 
     restart = min([num_particles*3,10])
     maxiter = min([num_particles*3,100])
+    start = time.time()
     dip,info = gmres(solve,H_match,x0 = dip_guess,rtol=errortol,
                             restart = restart, maxiter = maxiter)
 
@@ -489,21 +489,41 @@ def gen_neighbor_list(positions,box_length,cutoff,half=True):#{{{
     #}}}
 
 if __name__ == "__main__":
-    positions = np.array(
-                [[[-1,2.8,0],
-                 [-4.6,2.3,0],
-                 [-3.05,1,0],
+    #---- Trial One ----
+    #positions = np.array(
+    #            [[[-1,2.8,0],
+    #             [-4.6,2.3,0],
+    #             [-3.05,1,0],
 
-                 [-1.35,-0.45,0],
-                 [0.4,-1.4,0],
+    #             [-1.35,-0.45,0],
+    #             [0.4,-1.4,0],
 
-                 [4.3,1.2,0],
-                 [2.65,0.1,0],
-                 [4.5,-1,0],
+    #             [4.3,1.2,0],
+    #             [2.65,0.1,0],
+    #             [4.5,-1,0],
 
-                 [-4.2,-1.05,0],
-                 [-2.75,-2.5,0]]])
-    box = np.array([30,30,30])
+    #             [-4.2,-1.05,0],
+    #             [-2.75,-2.5,0]]])
+    #box = np.array([30,30,30])
+
+    #---- Trial Two ----
+    #positions = np.loadtxt("Hex_Pos.txt",delimiter = ',')
+    #positions = np.array([positions])
+    #box = np.loadtxt("Hex_Box.txt",delimiter = ',')
+    #box[2] = 50
+
+    #---- Trial Three ----
+    import gsd.hoomd
+    traj = gsd.hoomd.open("N100-dt0.0001.gsd")
+    positions = []
+    for i in range(0,len(traj),20):
+        frame = traj[i]
+        positions.append(frame.particles.position)
+        box = frame.configuration.box[:3]
+    positions = np.array(positions)
+
     
-    run_MPM(positions,box,0.05,2,0.5,0.01,0.8,0.01)
+    start = time.time()
+    run_MPM(positions,box,0.05,2,1,0.01,0.8,0.01)
+    print(time.time() - start, "seconds")
     plot_MPM()

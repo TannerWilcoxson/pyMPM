@@ -48,7 +48,6 @@ k = cat(4,KX,KY,KZ);
 
 % Scale the transformed grid
 [fHtilde] = Scale(fH,k,Ngrid,xi,eta);
-fHtildex = fHtilde(:,:,:,1);
 
 % Invert each component of the transformed grid
 Htildex = ifftn(ifftshift(fHtilde(:,:,:,1)));
