@@ -4,6 +4,7 @@ np.set_printoptions(edgeitems=30, linewidth=100000,
 import itertools
 import time
 import warnings
+import matplotlib.pyplot as plt
 from scipy.sparse.linalg import gmres
 from scipy.special import jv as besselj
 from scipy.special import erfc
@@ -13,12 +14,12 @@ from scipy.sparse.linalg import gmres,LinearOperator
 from scipy.optimize import root
 from scipy.sparse.linalg import lsqr
 
-@profile
 def run_MPM(posistions,box,gamma,eps_inf,xi,kmin,kmax,dk,outfile = "MPM"):# {{{
     num_particles = positions.shape[1]
-    k = np.arange(kmin,kmax+dk,dk).astype("complex128")
+    k = np.arange(kmin,kmax+dk,dk)
     num_waves = len(k)
-    eps_p = (eps_inf - 1/(k**2+1j*k*gamma))
+    eps_p = np.zeros(num_waves,dtype = "complex128")
+    eps_p[...] = (eps_inf - 1/(k**2+1j*k*gamma))
     eps_in = np.ones([num_waves,num_particles])*eps_p[:,None]
 
     cap,dip = capacitance_tensor_spectrum(positions,box,eps_in,xi)
@@ -31,7 +32,12 @@ def plot_MPM(infile = "MPM"):# {{{
     C = np.load(infile + "_capacitance.npy")
     eps_p = np.load(infile + "_dipoles.npy")
     k = np.load(infile + "_wavenumbers.npy")
-    pass# }}}
+
+    ext = k*np.imag(C[:,0,0] + C[:,1,1] + C[:,2,2])/3
+    plt.plot(k,ext,'k-')
+    plt.ylim(0,20)
+    plt.show()
+    return# }}}
 def capacitance_tensor_spectrum(pos,box,eps_p,xi,particle_dia = None,errortol = 1e-3):# {{{
     num_frames = pos.shape[0]
     num_particles = pos.shape[1]
@@ -267,8 +273,27 @@ def magnetic_dipole(positions,lambda_p,H,box,p1,p2,num_grid,grid_spacing,num_gri
 
     dip_guess = dip_guess.flatten()
 
-    #---- k value calculations ----{{{
+    #---- Spread/Contract PreCalcs ----{{{
+    num_offset = offset.shape[0]
+    num_spread = num_particles*num_offset
+
+    grid_idxs = np.round(positions/grid_spacing).astype(int)
+    particle_grid_dist = grid_idxs*grid_spacing - positions
+    grid_effect_idxs = (grid_idxs[:,None,:] + offset[None,:,:] - 1) % num_grid
+    grid_effect_idxs = grid_effect_idxs.reshape(num_spread,3)
+    spread_idxs = grid_effect_idxs
+
+    grid_effect_dist = (particle_grid_dist[:,None,:] + offsetxyz[None,:,:])
+    grid_effect_div_eta = np.sum(grid_effect_dist**2/eta,axis = -1)
+    spread_coef = (2*xi**2/np.pi)**(3/2)*np.sqrt(1/np.prod(eta))*np.exp(-2*xi**2*grid_effect_div_eta)
+    contract_coef = np.prod(grid_spacing)*spread_coef
+    contract_coef = contract_coef.reshape(num_spread)
+
+    particle_index = np.repeat(np.arange(num_particles),len(offset))
+    # }}}
+    #---- Scale Precalcs ----{{{
     warnings.filterwarnings('ignore')
+
 
     Kx = np.arange(-np.ceil((num_grid[0]-1)/2),np.floor((num_grid[0] - 1)/2)+1) * 2*np.pi/box[0]
     Ky = np.arange(-np.ceil((num_grid[1]-1)/2),np.floor((num_grid[1] - 1)/2)+1) * 2*np.pi/box[1]
@@ -290,150 +315,11 @@ def magnetic_dipole(positions,lambda_p,H,box,p1,p2,num_grid,grid_spacing,num_gri
     khat[*k0_ind] = 0
 
     etaksq  = np.sum(ksq*(1-eta),axis = -1)
-    Htilde_coeff = 9*np.pi/(2*kmag) * besselj(1+1/2,kmag)**2 * np.exp(-etaksq/(4*xi**2)) / ksqsm
-    Htilde_coeff[*k0_ind] = 0
-
-    kvals = dict()
-    kvals["k"] = k
-    kvals["ksq"] = ksq
-    kvals["ksqsm"] = ksqsm
-    kvals["kmag"] = kmag
-    kvals["khat"] = khat
-    kvals["k0_ind"] = k0_ind
-    kvals["Htilde_coeff"] = Htilde_coeff
+    scale_coef = 9*np.pi/(2*kmag) * besselj(1+1/2,kmag)**2 * np.exp(-etaksq/(4*xi**2)) / ksqsm
+    scale_coef[*k0_ind] = 0
     warnings.filterwarnings('default')# }}}
-
-    #Preallocations
-    Hspace = np.zeros(np.append(num_grid,3)).astype('complex128')
-
-    #Guess
-    Hrep = np.array(H.tolist()*num_particles)
-
-    def solve(dip):
-        H = magnetic_field(positions,dip,lambda_p, box, p1, p2, num_grid, 
-                       grid_spacing, num_grid_gaussian, xi, eta, rc, offset,
-                       offsetxyz, dip_perp, dip_para, rvals, kvals,Hspace)
-        ret = H.flatten()
-        return ret
-
-
-    dip = dip_guess.reshape(num_particles,3)
-    solve = LinearOperator(2*[3*num_particles], matvec = solve,dtype = "complex128")
-
-    restart = min([num_particles*3,10])
-    maxiter = min([num_particles*3,100])
-    dip,info = gmres(solve,Hrep,x0 = dip_guess.reshape(3*num_particles),atol=errortol,
-                            restart = restart, maxiter = maxiter)
-    dip = dip.reshape(num_particles,3)
-
-    return dip
-
-    # }}}
-def magnetic_field(positions, dipoles, lambda_p, box, p1, p2, num_grid, #{{{
-                   grid_size, num_grid_gaussian, xi, eta, rc, offset, 
-                   offsetxyz, dip_perp, dip_para,rvals,kvals,Hspace):
-
-    num_particles = positions.shape[0]
-    dipoles = dipoles.reshape(num_particles,3)
-
-    H = spread(positions, dipoles, num_grid, grid_size, xi,eta,num_grid_gaussian,offset,offsetxyz,Hspace)
-
-    Hx,Hy,Hz = H.T
-    Hx,Hy,Hz = Hx.T,Hy.T,Hz.T
-
-    fHx = fftn(Hx,overwrite_x=True)
-    fHx = fftshift(Hx)[:,:,:,None]
-
-    fHy = fftn(Hy,overwrite_x=True)
-    fHy = fftshift(Hy)[:,:,:,None]
-
-    fHz = fftn(Hz,overwrite_x=True)
-    fHz = fftshift(Hz)[:,:,:,None]
-
-    fH = np.concatenate([fHx,fHy,fHz],axis = -1,out=Hspace)
-
-    fHtilde = scale(fH,kvals,num_grid,xi,eta)
-    fHtildex = fHtilde[:,:,:,0]
-
-    Htildex = ifftn(ifftshift(fHtilde[:,:,:,0]))[:,:,:,None]
-    Htildey = ifftn(ifftshift(fHtilde[:,:,:,1]))[:,:,:,None]
-    Htildez = ifftn(ifftshift(fHtilde[:,:,:,2]))[:,:,:,None]
-    Htilde = np.concatenate([Htildex,Htildey,Htildez],axis = -1,out=Hspace)
-
-    Hk = contract(positions,num_grid,grid_size,xi,eta,num_grid_gaussian,Htilde,offset,offsetxyz)
-    Hr = real_space(positions,dipoles,lambda_p, box, p1,p2,rc,dip_perp,dip_para,rvals)
-    
-    ret = Hk + Hr
-
-    return Hk + Hr
-    # }}}
-def spread(positions,dip,num_grid,grid_spacing,xi,eta,num_grid_gaussian,offset,offsetxyz,H):# {{{
-    num_particles = positions.shape[0]
-    num_spread = num_particles*len(offset)
-    H[:,:,:,:] = 0
-
-
-    grid_idxs = np.round(positions/grid_spacing).astype(int)
-    particle_grid_dist = grid_idxs*grid_spacing - positions
-    grid_effect_idxs = (grid_idxs[:,None,:] + offset[None,:,:] - 1) % num_grid
-    grid_effect_dist = (particle_grid_dist[:,None,:] + offsetxyz[None,:,:])
-
-    grid_effect_div_eta = np.sum(grid_effect_dist**2/eta,axis = -1)
-
-    Hcoef = (2*xi**2/np.pi)**(3/2)*np.sqrt(1/np.prod(eta))*np.exp(-2*xi**2*grid_effect_div_eta)
-    Hspread = Hcoef[:,:,None]*dip[:,None,:]
-
-    grid_effect_idxs = grid_effect_idxs.reshape(num_spread,3)
-    Hspread = Hspread.reshape(num_spread,3)
-
-    np.add.at(H,tuple(grid_effect_idxs.T),Hspread)
-
-    return H# }}}
-def scale(fH, kvals, num_grid, xi, eta):# {{{
-
-    k = kvals["k"]
-    ksq = kvals["ksq"]
-    ksqsm = kvals["ksqsm"]
-    kmag = kvals["kmag"]
-    khat = kvals["khat"]
-    k0_ind = kvals["k0_ind"]
-    Htilde_coeff = kvals["Htilde_coeff"]
-
-
-    np.multiply(fH,khat,out=fH)
-    fH = fH.T
-    sum = Htilde_coeff*(fH[0]+fH[1]+fH[2]).T
-    fH = fH.T
-    np.multiply(khat,sum[:,:,:,None],out=fH)
-    return fH
-# }}}
-def contract(positions,num_grid,grid_spacing,xi,eta,num_grid_gaussian,Htilde,offset,offsetxyz):# {{{
-    num_particles = positions.shape[0]
-    num_spread = num_particles*len(offset)
-    Hk = np.zeros([num_particles,3],dtype="complex128")
-
-    grid_idxs = np.round(positions/grid_spacing).astype(int)
-    particle_grid_dist = grid_idxs*grid_spacing - positions
-    grid_effect_idxs = (grid_idxs[:,None,:] + offset[None,:,:] - 1) % num_grid
-    grid_effect_idxs = grid_effect_idxs.reshape(num_spread,3)
-
-    grid_effect_dist = (particle_grid_dist[:,None,:] + offsetxyz[None,:,:])
-    grid_effect_div_eta = np.sum(grid_effect_dist**2/eta,axis = -1)
-
-    Hcoef = (2*xi**2/np.pi)**(3/2)*np.sqrt(1/np.prod(eta))*np.exp(-2*xi**2*grid_effect_div_eta)
-    Hcoef *= np.prod(grid_spacing)
-    Hcoef = Hcoef.reshape(num_spread)
-    particle_index = np.repeat(np.arange(num_particles),len(offset))
-
-
-    np.add.at(Hk,particle_index,Hcoef[:,None]*Htilde[*grid_effect_idxs.T])
-    return Hk
-# }}}
-def real_space(positions, dip, lambda_p, box, p1, p2, rc, dip_perp, dip_para,rvals):# {{{
-    Hr = -3/(4*np.pi*(1-lambda_p[:,None])) * dip
-
-    Hr = Hr + dip*dip_perp[0]
-
+    #---- Real_Space Precals  ----{{{
+    real_coef = -3/(4*np.pi*(1-lambda_p[:,None]))
     r = positions[p1] - positions[p2]
     r = r-box*(2*r/box).astype(int)
     d = np.sqrt(np.sum(r**2,axis = -1))
@@ -442,20 +328,105 @@ def real_space(positions, dip, lambda_p, box, p1, p2, rc, dip_perp, dip_para,rva
     d = d[cutoff_flags]
     r = r[cutoff_flags]
     r = r[:,:]/d[:,None]
+    delta = r
 
     p1 = p1[cutoff_flags]
     p2 = p2[cutoff_flags]
 
-    dip_p2 = dip[p2]
     int_perp = interp1d(rvals,dip_perp)
     int_para = interp1d(rvals,dip_para)
 
+    self_perp = int_perp(0)
     perp = int_perp(d)
     para = int_para(d)
+    #}}}
+    #---- Preallocations ----{{{
+    H_particle = np.zeros([num_particles,3],dtype="complex128")
+    H_grid = np.zeros(np.append(num_grid,3)).astype('complex128')
+    # }}}
 
-    r_dip_p2 = np.sum(dip_p2*r,axis = -1)
-    np.add.at(Hr,p1,perp[:,None]*(dip_p2 - r*r_dip_p2[:,None]) + para[:,None]*r*r_dip_p2[:,None])
-    return Hr
+    def solve(dipoles):
+        H = magnetic_field(dipoles,
+                           H_grid,H_particle,
+                           spread_coef,spread_idxs, #Spread
+                           khat,scale_coef, #Scale
+                           particle_index,contract_coef, #Contract
+                           real_coef,self_perp,p1,p2,delta,para,perp)#Real
+        ret = H.flatten()
+        return ret
+
+
+    H_match = np.array(H.tolist()*num_particles)
+    solve = LinearOperator(2*[3*num_particles], matvec = solve,dtype = "complex128")
+
+    restart = min([num_particles*3,10])
+    maxiter = min([num_particles*3,100])
+    dip,info = gmres(solve,H_match,x0 = dip_guess,rtol=errortol,
+                            restart = restart, maxiter = maxiter)
+
+    dip = dip.reshape(num_particles,3)
+    return dip
+
+    # }}}
+def magnetic_field(dipoles,#{{{
+                   H_grid,H_particle, #Preallocations
+                   spread_coef,spread_idxs, #Spread
+                   khat,scale_coef, #Scale
+                   particle_index,contract_coef, #Contract
+                   real_coef,self_perp,p1,p2,delta,para,perp): #Real
+
+    num_particles = H_particle.shape[0]
+    dipoles = dipoles.reshape(num_particles,3)
+
+    H_grid[...] = 0
+    H_grid = spread(H_grid,spread_coef,dipoles,spread_idxs)
+    fHx = fftshift(fftn(H_grid[:,:,:,0],overwrite_x=True))[:,:,:,None]
+    fHy = fftshift(fftn(H_grid[:,:,:,1],overwrite_x=True))[:,:,:,None]
+    fHz = fftshift(fftn(H_grid[:,:,:,2],overwrite_x=True))[:,:,:,None]
+    fH_grid = np.concatenate([fHx,fHy,fHz],axis = -1,out=H_grid)
+
+    fHs_grid = scale(fH_grid,khat,scale_coef)
+    Hsx = ifftn(ifftshift(fHs_grid[:,:,:,0]),overwrite_x=True)[:,:,:,None]
+    Hsy = ifftn(ifftshift(fHs_grid[:,:,:,1]),overwrite_x=True)[:,:,:,None]
+    Hsz = ifftn(ifftshift(fHs_grid[:,:,:,2]),overwrite_x=True)[:,:,:,None]
+    Hs_grid = np.concatenate([Hsx,Hsy,Hsz],axis = -1,out=fHs_grid)
+
+    H_particle[...] = 0
+    H_particle = contract(H_particle,Hs_grid,particle_index,contract_coef,spread_idxs)
+    H_particle = real_space(H_particle,real_coef,dipoles,self_perp,p1,p2,delta,para,perp)
+
+    return H_particle
+    # }}}
+def spread(H_grid,spread_coef,dip,spread_idxs):# {{{
+    num_spread = spread_idxs.shape[0]
+
+    Hspread = spread_coef[:,:,None]*dip[:,None,:]
+    Hspread = Hspread.reshape(num_spread,3)
+
+    np.add.at(H_grid,tuple(spread_idxs.T),Hspread)
+    return H_grid
+    # }}}
+def scale(fH_grid, khat, coef):# {{{
+    np.multiply(fH_grid,khat,out=fH_grid)
+    fH_grid = fH_grid.T
+    sum = coef*(fH_grid[0]+fH_grid[1]+fH_grid[2]).T
+    fH_grid = fH_grid.T
+    np.multiply(khat,sum[:,:,:,None],out=fH_grid)
+    return fH_grid
+# }}}
+def contract(H_particle,Hs_grid,particle_index,contract_coef,spread_idxs):# {{{
+    np.add.at(H_particle,particle_index,contract_coef[:,None]*Hs_grid[*spread_idxs.T])
+    return H_particle
+# }}}
+def real_space(H_particle,real_coef,dip,self_perp,p1,p2,delta,para,perp):# {{{
+    H_particle += real_coef * dip
+    H_particle += dip*self_perp
+    dip_p2 = dip[p2]
+    delta_dip_p2 = np.sum(dip_p2*delta,axis = -1)
+    np.add.at(H_particle,p1,perp[:,None]*(dip_p2\
+                                        - delta*delta_dip_p2[:,None])\
+                                        + para[:,None]*delta*delta_dip_p2[:,None])
+    return H_particle
 # }}}
 def precalculations(num_grid_gaussian,h):# {{{
     off = int(num_grid_gaussian/2)
@@ -532,7 +503,6 @@ if __name__ == "__main__":
 
                  [-4.2,-1.05,0],
                  [-2.75,-2.5,0]]])
-
     box = np.array([30,30,30])
     
     run_MPM(positions,box,0.05,2,0.5,0.01,0.8,0.01)
